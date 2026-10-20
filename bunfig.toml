@@ -1,0 +1,4 @@
+[install]
+# Hoisted node_modules: with the isolated linker (+ bun's global store), packages run
+# from the global cache can't see their own deps under Node (e.g. kit -> esm-env).
+linker = "hoisted"
