@@ -11,21 +11,37 @@
 
 	let error = $state<string | null>(null);
 	let scroller = $state<HTMLElement>();
+	let runs = $state<{ id: string; flow: string; origin: string; status: string; updated: number; steps: number }[]>([]);
+
+	const setUrl = (q: string) => goto(`?${q}`, { shallow: true, replace: true, state: {} });
 
 	onMount(async () => {
 		try {
 			await Promise.all([scripts.load(), storage.load()]);
 			await runner.boot();
+			const run = page.url.searchParams.get('run');
 			const flow = page.url.searchParams.get('flow');
-			if (flow) runner.start(flow);
+			if (run) await runner.open(run);
+			else if (flow) runner.start(flow);
+			else runs = (await (await fetch('/api/runs')).json()).runs;
 		} catch (e) {
 			error = String(e);
 		}
 	});
 
 	function open(flow: string) {
-		goto(`?flow=${encodeURIComponent(flow)}`, { shallow: true, replace: true, state: {} });
+		setUrl(`flow=${encodeURIComponent(flow)}`);
 		runner.start(flow);
+	}
+
+	function openRun(id: string) {
+		setUrl(`run=${encodeURIComponent(id)}`);
+		runner.open(id).catch((e) => (error = String(e)));
+	}
+
+	async function save() {
+		await runner.save();
+		setUrl(`run=${encodeURIComponent(runner.runId!)}`);
 	}
 
 	const name = (p: string) => p.replace(/^flows\//, '').replace(/\.lua$/, '');
@@ -51,7 +67,11 @@
 			{#if runner.status === 'running' || runner.status === 'waiting'}
 				<button onclick={() => runner.stop()}>stop</button>
 			{/if}
+			<button onclick={save} title="실행 기록 저장 (이후 자동 저장, CLI에서 --resume 가능)">
+				{runner.runId ? 'saved' : 'save'}
+			</button>
 			<span class="status {runner.status}">{runner.replaying ? 'replaying' : runner.status}</span>
+			{#if runner.runId}<span class="status" title="saved run">{runner.runId}</span>{/if}
 		{/if}
 		<span class="spacer"></span>
 		{#each enabled as v (v.id)}
@@ -78,6 +98,18 @@
 								</button>
 							{/each}
 						</div>
+						{#if runs.length}
+							<h1>Runs</h1>
+							<p>저장된 실행 기록 (CLI 실행 포함) — 열면 그대로 재생되고, 멈춘 곳부터 이어서 진행할 수 있어요.</p>
+							<ul class="runs">
+								{#each runs.slice(0, 30) as r (r.id)}
+									<li>
+										<button onclick={() => openRun(r.id)}>{r.id}</button>
+										<span>{name(r.flow)} · {r.origin} · {r.status} · 답변 {r.steps}개 · {new Date(r.updated).toLocaleString()}</span>
+									</li>
+								{/each}
+							</ul>
+						{/if}
 					</div>
 				{:else}
 					<div class="cell-head">┌ {name(runner.flow)}</div>
@@ -178,6 +210,27 @@
 	.cards span {
 		color: var(--fg-3);
 		font-size: 0.85rem;
+	}
+	.runs {
+		list-style: none;
+		padding: 0;
+		font-size: 0.85rem;
+	}
+	.runs li {
+		display: flex;
+		gap: 0.8rem;
+		align-items: baseline;
+		padding: 0.15rem 0;
+	}
+	.runs button {
+		background: none;
+		border: none;
+		padding: 0;
+		color: var(--accent);
+		font-family: var(--mono);
+	}
+	.runs span {
+		color: var(--fg-3);
 	}
 	.err {
 		color: var(--danger);

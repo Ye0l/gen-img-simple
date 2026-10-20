@@ -15,8 +15,28 @@ bun run dev          # http://localhost:5173
 bun run build && bun run start   # production (adapter-node, PORT=3000)
 ```
 
+## CLI
+
+같은 flow 를 터미널에서 실행합니다 (엔진은 웹과 공유, 프롬프트는 `sv create` 와 같은 clack).
+
+```sh
+bun run cli                  # flow 선택
+bun run cli novelai          # flows/novelai.lua 실행
+bun run cli --runs           # 저장된 실행 목록
+bun run cli --resume <id>    # 저장된 실행을 재생하고 멈춘 곳부터 계속
+```
+
+- 모든 실행은 `DATA_DIR/runs/<id>.json` 에 자동 저장 (Ctrl+C 로 멈춰도 저장됨).
+  웹에서 `/?run=<id>` (또는 첫 화면의 Runs 목록) 로 열면 셀·preview·log 뷰가 그대로 보이고, 이어서 진행할 수 있습니다.
+  반대로 웹에서 `save` 한 실행도 `--resume` 으로 CLI 에서 이어갈 수 있습니다.
+- 생성 이미지는 `DATA_DIR/out/<id>/` 에 저장되고, 터미널이 지원하면 바로 표시됩니다.
+  자동 감지 순서: kitty 그래픽(kitty, ghostty) → iTerm2 인라인(iTerm2, WezTerm) → sixel(터미널에 질의해서 확인, 최신 Termux 등)
+  → 트루컬러 반블록(▀, 대부분의 터미널) → 경로만. tmux/screen 안에서는 반블록.
+  `--images=kitty|iterm|sixel|blocks|off` 또는 `GENIMG_IMAGES` 로 강제. sixel/반블록은 PNG 만 (SVG 데모 이미지는 경로만).
+- view 함수는 CLI 에선 무시됩니다 (실행 기록을 웹에서 열면 적용).
+
 환경 변수: `SCRIPTS_DIR` (기본 `./scripts`), `DATA_DIR` (저장소 위치, 기본 `./data`, git 제외),
-`HTTP_ALLOW` (http 프록시가 접근할 host 목록, 비우면 제한 없음).
+`HTTP_ALLOW` (http 프록시가 접근할 host 목록, 비우면 제한 없음), `WEB_URL` (CLI 가 안내하는 웹 주소, 기본 `http://localhost:5173`).
 
 ## 샘플
 
@@ -125,10 +145,15 @@ scripts/                     # 사용자 스크립트 (Editor 뷰에서 편집/�
   functions/*.lua
   flows/*.lua
 src/lib/runtime/prelude.lua  # Lua 쪽 API 정의 (md, input, view, http ...)
-src/lib/runtime/runner.svelte.ts  # wasmoon(Lua 5.4 wasm) 실행 + 셀/리플레이
+src/lib/runtime/core.ts      # 공용 엔진: wasmoon(Lua 5.4) 실행, 리플레이 로그, host 브리지 (Frontend/Backend 인터페이스)
+src/lib/runtime/runner.svelte.ts  # 웹 Frontend: 셀 렌더링, /api 를 쓰는 Backend
+cli/main.ts                  # CLI Frontend(clack) + 파일시스템 Backend
+cli/term-image.ts            # 터미널 이미지 (kitty/iTerm2/sixel/반블록, PNG 디코더 내장)
+src/lib/server/              # scripts, storage, runs, http 프록시 — 순수 node 라 CLI 와 공유 (env.ts 만 SvelteKit 바인딩)
 src/lib/views.svelte.ts      # 내장 뷰 레지스트리 (새 뷰: 여기 + components/views/index.ts)
 src/lib/components/          # Cell, Ask, Dock, views/*
 src/routes/api/scripts       # 스크립트 읽기/저장
 src/routes/api/store         # secret(쓰기 전용)/text 저장소 → DATA_DIR/secrets.json, text.json
 src/routes/api/http          # http.request 프록시 ({{secret:name}} 치환)
+src/routes/api/runs          # 실행 기록 목록/읽기/저장
 ```

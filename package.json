@@ -7,6 +7,7 @@
 		"dev": "vite dev",
 		"build": "vite build",
 		"start": "bun build/index.js",
+		"cli": "bun cli/main.ts",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
@@ -27,6 +28,7 @@
 		"#lib/*": "./src/lib/*"
 	},
 	"dependencies": {
+		"@clack/prompts": "^1.8.1",
 		"marked": "^18.1.1",
 		"wasmoon": "^1.16.0"
 	}

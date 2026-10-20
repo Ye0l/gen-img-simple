@@ -1,6 +1,8 @@
 // Client-side copy of every script under scripts/. The editor works on this
 // copy, and the runtime reads from it, so unsaved edits run immediately.
 
+import { resolveScript } from './runtime/core.js';
+
 class Scripts {
 	files = $state<Record<string, string>>({});
 	saved = $state<Record<string, string>>({});
@@ -52,14 +54,8 @@ class Scripts {
 		return path;
 	}
 
-	/**
-	 * "foo" -> functions/foo.lua, "flows/x" -> flows/x.lua, exact paths as-is.
-	 * `dir` is the default folder for bare names.
-	 */
-	resolve(name: string, dir = 'functions'): string | null {
-		const n = name.replace(/\./g, '/').replace(/\/lua$/, '');
-		const candidates = [name, `${n}.lua`, `${dir}/${n}.lua`, `${n}/init.lua`, `${dir}/${n}/init.lua`];
-		return candidates.find((c) => c in this.files) ?? null;
+	resolve(name: string, dir = 'functions') {
+		return resolveScript(this.files, name, dir);
 	}
 }
 

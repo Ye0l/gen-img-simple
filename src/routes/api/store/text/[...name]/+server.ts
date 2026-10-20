@@ -1,5 +1,5 @@
 import { error, text } from '@sveltejs/kit';
-import { texts } from '#lib/server/storage.js';
+import { texts } from '#lib/server/env.js';
 import type { RequestHandler } from './$types';
 
 const fail = (e: unknown) => error(400, e instanceof Error ? e.message : String(e));

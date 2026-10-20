@@ -1,53 +1,26 @@
-// Runs a Lua flow and turns its host calls into notebook cells.
-//
-// Editing works by deterministic replay: every non-deterministic host call
-// (user answers, http responses, the random seed, sleeps) is recorded in an
-// ordered log. To change an earlier answer, the flow is restarted and the log
-// is fed back up to that point, so earlier generations are not repeated.
+// Web frontend for the flow engine: turns host calls into notebook cells.
+// The engine itself (replay log, Lua bridge) lives in core.ts and is shared with the CLI.
 
-import { LuaFactory, type LuaEngine } from 'wasmoon';
+import { LuaFactory } from 'wasmoon';
 import wasmUrl from 'wasmoon/dist/glue.wasm?url';
 import prelude from './prelude.lua?raw';
 import { scripts } from '#lib/scripts.svelte.js';
 import { storage } from '#lib/storage.svelte.js';
-import { unzip } from './zip.js';
-import { views, type Dock } from '#lib/views.svelte.js';
+import { views } from '#lib/views.svelte.js';
+import {
+	FlowRun,
+	newRunId,
+	plain,
+	type AskKind,
+	type AskOpts,
+	type Backend,
+	type Entry,
+	type Frontend,
+	type HttpRaw,
+	type RunFile
+} from './core.js';
 
-export type AskKind = 'input' | 'choose' | 'multi' | 'confirm' | 'number' | 'form' | 'secret';
-
-export interface Option {
-	label: string;
-	value: unknown;
-	hint?: string;
-}
-
-export interface Field {
-	name: string;
-	label?: string;
-	type?: 'text' | 'textarea' | 'number' | 'select' | 'checkbox';
-	default?: unknown;
-	options?: Option[];
-	min?: number;
-	max?: number;
-	step?: number;
-	placeholder?: string;
-}
-
-export interface AskOpts {
-	label?: string;
-	hint?: string;
-	default?: unknown;
-	placeholder?: string;
-	multiline?: boolean;
-	options?: Option[];
-	fields?: Field[];
-	min?: number;
-	max?: number;
-	step?: number;
-	required?: boolean;
-	/** secret asks: storage name the value is saved under */
-	name?: string;
-}
+export type { AskKind, AskOpts, Field, Option } from './core.js';
 
 interface Base {
 	id: number;
@@ -66,106 +39,10 @@ export type Cell = Base &
 
 export type AskCell = Extract<Cell, { type: 'ask' }>;
 
-interface Entry {
-	kind: 'seed' | 'ask' | 'http' | 'sleep' | 'store';
-	tag: string;
-	value: unknown;
-}
-
 export type Status = 'idle' | 'running' | 'waiting' | 'done' | 'error' | 'stopped';
 
 let factory: LuaFactory | null = null;
 const getFactory = () => (factory ??= new LuaFactory(wasmUrl));
-// no proxies: JS values reach Lua as plain tables (pairs/type work as expected)
-const engineOpts = { enableProxy: false };
-
-const never = () => new Promise<never>(() => {});
-const plain = <T>(v: T): T => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
-
-/**
- * Lua tables cross over as objects/arrays, but an empty table always becomes {}.
- * json.array(t) in Lua marks a table with __array so it is sent as a JSON array.
- */
-function fixArrays(v: unknown): unknown {
-	if (Array.isArray(v)) return v.map(fixArrays);
-	if (v === null || typeof v !== 'object') return v;
-	const o = v as Record<string, unknown>;
-	if (o.__array) {
-		return Object.keys(o)
-			.filter((k) => k !== '__array')
-			.sort((a, b) => Number(a) - Number(b))
-			.map((k) => fixArrays(o[k]));
-	}
-	return Object.fromEntries(Object.entries(o).map(([k, x]) => [k, fixArrays(x)]));
-}
-
-function normOptions(list: unknown): Option[] | undefined {
-	if (!Array.isArray(list)) return undefined;
-	return list.map((o) =>
-		typeof o === 'object' && o !== null
-			? {
-					label: String((o as Option).label ?? (o as Option).value),
-					value: (o as Option).value ?? (o as Option).label,
-					hint: (o as Option).hint
-				}
-			: { label: String(o), value: o }
-	);
-}
-
-function toBase64(s: string) {
-	let bin = '';
-	for (const b of new TextEncoder().encode(s)) bin += String.fromCharCode(b);
-	return btoa(bin);
-}
-
-async function doHttp(req: {
-	url: string;
-	method?: string;
-	headers?: Record<string, string>;
-	body?: string;
-	json?: unknown;
-	direct?: boolean;
-}) {
-	const headers: Record<string, string> = { ...(req.headers ?? {}) };
-	let body = req.body;
-	if (req.json !== undefined) {
-		body = JSON.stringify(fixArrays(req.json));
-		headers['content-type'] ??= 'application/json';
-	}
-	const method = req.method ?? (body ? 'POST' : 'GET');
-	let out: { status: number; ok: boolean; headers: Record<string, string>; body: string; encoding: string };
-	if (req.direct) {
-		const r = await fetch(req.url, { method, headers, body });
-		const ct = r.headers.get('content-type') ?? '';
-		const binary = /^(image|audio|video)\/|octet-stream|zip|msgpack/.test(ct);
-		out = {
-			status: r.status,
-			ok: r.ok,
-			headers: Object.fromEntries(r.headers),
-			body: binary ? await blobToBase64(await r.blob()) : await r.text(),
-			encoding: binary ? 'base64' : 'text'
-		};
-	} else {
-		const r = await fetch('/api/http', {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ url: req.url, method, headers, body })
-		});
-		if (!r.ok) throw new Error(`proxy error ${r.status}: ${await r.text()}`);
-		out = await r.json();
-	}
-	const ct = out.headers['content-type'] ?? '';
-	const res: Record<string, unknown> = { status: out.status, ok: out.ok, headers: out.headers, body: out.body };
-	if (out.encoding === 'base64') res.data_url = `data:${ct.split(';')[0]};base64,${out.body}`;
-	else if (ct.includes('json')) {
-		try {
-			res.json = JSON.parse(out.body);
-		} catch {
-			/* not json after all */
-		}
-	}
-	return res;
-}
 
 function blobToBase64(b: Blob) {
 	return new Promise<string>((resolve, reject) => {
@@ -176,36 +53,69 @@ function blobToBase64(b: Blob) {
 	});
 }
 
+/** browser side of the backend: everything goes through the SvelteKit api */
+const backend: Backend = {
+	files: () => scripts.files,
+	async http(req) {
+		if (req.direct) {
+			const r = await fetch(req.url, { method: req.method, headers: req.headers, body: req.body });
+			const ct = r.headers.get('content-type') ?? '';
+			const binary = /^(image|audio|video)\/|octet-stream|zip|msgpack/.test(ct);
+			return {
+				status: r.status,
+				ok: r.ok,
+				headers: Object.fromEntries(r.headers),
+				body: binary ? await blobToBase64(await r.blob()) : await r.text(),
+				encoding: binary ? 'base64' : 'text'
+			};
+		}
+		const r = await fetch('/api/http', {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify(req)
+		});
+		if (!r.ok) throw new Error(`proxy error ${r.status}: ${await r.text()}`);
+		return (await r.json()) as HttpRaw;
+	},
+	secretNames: () => storage.secrets,
+	setSecret: (n, v) => storage.setSecret(n, v),
+	deleteSecret: (n) => storage.deleteSecret(n),
+	texts: () => storage.text,
+	setText: (n, v) => storage.setText(n, v),
+	deleteText: (n) => storage.deleteText(n)
+};
+
+const json = { 'content-type': 'application/json' };
+
 class Runner {
 	cells = $state<Cell[]>([]);
 	status = $state<Status>('idle');
 	flow = $state<string | null>(null);
 	/** set while the previous log is fed back */
 	replaying = $state(false);
+	/** saved run this session is bound to (autosaves while set) */
+	runId = $state<string | null>(null);
 
-	private log: Entry[] = [];
-	private replay: Entry[] = [];
-	/** log of the run before the current one: answers become defaults */
-	private prev: Entry[] = [];
-	/** later answers re-applied automatically after an edit ("run to end") */
-	private future: Entry[] = [];
-	private gen = 0;
+	private run: FlowRun | null = null;
+	/** log of the last finished/abandoned run, kept for edits and saving */
+	private lastLog: Entry[] = [];
 	private session = 0;
 	private nextId = 1;
-	private engine: LuaEngine | null = null;
+	private created = Date.now();
 	private pending = new Map<number, (v: unknown) => void>();
 	private store = new Map<string, unknown>();
+	private saveTimer: ReturnType<typeof setTimeout> | undefined;
 
-	/** run scripts/init.lua once (view setup etc.); its cells are discarded */
+	private get log() {
+		return this.run?.log ?? this.lastLog;
+	}
+
+	/** run scripts/init.lua once (view setup etc.); its output is discarded */
 	async boot() {
 		const path = scripts.resolve('init', '.');
 		if (!path) return;
 		try {
-			const engine = await getFactory().createEngine(engineOpts);
-			engine.global.set('__host', this.host(-1, true));
-			await this.loadPrelude(engine);
-			await engine.doString(`__main(${JSON.stringify(path)})`);
-			engine.global.close();
+			await new FlowRun({ factory: getFactory(), prelude, backend, frontend: this.frontend(), init: true }).run(path);
 		} catch (e) {
 			views.pushLog('error', `init.lua: ${e instanceof Error ? e.message : e}`);
 		}
@@ -214,9 +124,29 @@ class Runner {
 	/** fresh run of a flow */
 	start(flow: string) {
 		this.session++;
-		this.prev = [];
+		this.runId = null;
+		this.created = Date.now();
 		this.flow = flow;
 		return this.exec([]);
+	}
+
+	/** show a saved run (e.g. from the CLI) and continue it live from where it stopped */
+	async open(id: string) {
+		const res = await fetch(`/api/runs/${encodeURIComponent(id)}`);
+		if (!res.ok) throw new Error(`run not found: ${id}`);
+		const run = (await res.json()) as RunFile;
+		this.session++;
+		this.runId = run.id;
+		this.created = run.created;
+		this.flow = run.flow;
+		return this.exec(run.log);
+	}
+
+	/** bind this session to a saved run file; later changes autosave */
+	async save() {
+		if (!this.flow) return;
+		this.runId ??= newRunId(this.flow);
+		await this.persist();
 	}
 
 	/** restart and replay everything recorded (e.g. after editing a script) */
@@ -231,11 +161,11 @@ class Runner {
 	 */
 	rerunFrom(logPos: number, override?: Entry, keepLater = false) {
 		if (!this.flow) return;
-		const replay = this.log.slice(0, logPos);
+		const log = this.log;
+		const replay = log.slice(0, logPos);
 		if (override) replay.push(override);
-		const future = keepLater ? this.log.slice(replay.length).filter((e) => e.kind === 'ask') : [];
-		this.prev = this.log;
-		return this.exec(replay, future);
+		const future = keepLater ? log.slice(replay.length).filter((e) => e.kind === 'ask') : [];
+		return this.exec(replay, future, log);
 	}
 
 	answer(cell: AskCell, value: unknown) {
@@ -245,6 +175,7 @@ class Runner {
 		cell.answered = true;
 		// secret values never go into cells or the replay log
 		cell.answer = cell.kind === 'secret' ? true : value;
+		this.status = 'running';
 		resolve(plain(value));
 	}
 
@@ -263,226 +194,105 @@ class Runner {
 	}
 
 	private kill() {
-		this.gen++;
+		if (this.run) this.lastLog = this.run.log;
+		this.run?.kill();
+		this.run = null;
 		this.pending.clear();
-		try {
-			this.engine?.global.close();
-		} catch {
-			/* already closed */
-		}
-		this.engine = null;
 	}
 
-	private async exec(replay: Entry[], future: Entry[] = []) {
+	private async exec(replay: Entry[], future: Entry[] = [], prev: Entry[] = []) {
 		this.kill();
-		const gen = this.gen;
-		const flow = this.flow!;
-		this.log = [];
-		this.replay = replay;
-		this.future = future;
-		this.replaying = replay.length > 0;
 		this.cells = [];
 		this.status = 'running';
 		views.dropSession(this.session);
 
-		const path = scripts.resolve(flow, 'flows');
+		const run = new FlowRun({
+			factory: getFactory(),
+			prelude,
+			backend,
+			frontend: this.frontend(),
+			replay,
+			future,
+			prev,
+			store: this.store,
+			onEntry: () => this.scheduleSave(),
+			onLive: () => (this.replaying = false)
+		});
+		this.run = run;
+		this.replaying = run.replaying;
+
+		const path = scripts.resolve(this.flow!, 'flows');
 		try {
-			if (!path) throw new Error(`flow not found: ${flow}`);
-			const engine = await getFactory().createEngine(engineOpts);
-			if (gen !== this.gen) return engine.global.close();
-			this.engine = engine;
-			engine.global.set('__host', this.host(gen, false));
-			await this.loadPrelude(engine);
-			await engine.doString(`__main(${JSON.stringify(path)})`);
-			if (gen !== this.gen) return;
+			if (!path) throw new Error(`flow not found: ${this.flow}`);
+			await run.run(path);
+			if (run.dead) return;
 			this.status = 'done';
 		} catch (e) {
-			if (gen !== this.gen) return;
+			if (run.dead) return;
 			const msg = e instanceof Error ? e.message : String(e);
 			this.push({ type: 'error', text: msg });
 			views.pushLog('error', msg);
 			this.status = 'error';
 		} finally {
-			if (gen === this.gen) {
-				this.replaying = false;
-				this.engine?.global.close();
-				this.engine = null;
-			}
+			if (!run.dead) this.scheduleSave();
 		}
 	}
 
-	private async loadPrelude(engine: LuaEngine) {
-		// load() instead of doString so tracebacks say "prelude" instead of the whole source
-		engine.global.set('__prelude', prelude);
-		await engine.doString('local src = __prelude; __prelude = nil; assert(load(src, "@prelude"))()');
+	private scheduleSave() {
+		if (!this.runId) return;
+		clearTimeout(this.saveTimer);
+		this.saveTimer = setTimeout(() => this.persist().catch((e) => views.pushLog('error', String(e))), 400);
 	}
 
-	private push(c: Record<string, unknown> & { type: Cell['type'] }) {
-		const cell = { id: this.nextId++, logPos: this.log.length, ...c } as Cell;
+	private async persist() {
+		const run: RunFile = {
+			id: this.runId!,
+			flow: this.flow!,
+			created: this.created,
+			updated: Date.now(),
+			origin: 'web',
+			status: this.status,
+			log: this.log
+		};
+		const res = await fetch(`/api/runs/${encodeURIComponent(run.id)}`, {
+			method: 'PUT',
+			headers: json,
+			body: JSON.stringify(run)
+		});
+		if (!res.ok) throw new Error(`saving run failed: ${await res.text()}`);
+	}
+
+	private push(c: Record<string, unknown> & { type: Cell['type'] }, logPos = this.log.length) {
+		const cell = { id: this.nextId++, logPos, ...c } as Cell;
 		this.cells.push(cell);
 		// return the reactive proxy, not the raw object
 		return this.cells[this.cells.length - 1];
 	}
 
-	/** replay-aware wrapper for anything non-deterministic */
-	private async record<T>(gen: number, kind: Entry['kind'], tag: string, live: () => Promise<T>): Promise<T> {
-		const r = this.takeReplay(kind, tag);
-		if (r) return r.value as T;
-		this.replaying = false;
-		const value = await live();
-		if (gen !== this.gen) return never();
-		this.log.push({ kind, tag, value });
-		return value;
-	}
-
-	/** sync variant of record() for reads like the seed or storage lookups */
-	private recordSync<T>(init: boolean, kind: Entry['kind'], tag: string, live: () => T): T {
-		if (init) return live();
-		const r = this.takeReplay(kind, tag);
-		if (r) return r.value as T;
-		const value = plain(live());
-		this.log.push({ kind, tag, value });
-		return value;
-	}
-
-	private takeReplay(kind: Entry['kind'], tag: string): Entry | null {
-		const i = this.log.length;
-		const r = this.replay[i];
-		if (r && r.kind === kind && r.tag === tag) {
-			this.log.push(r);
-			return r;
-		}
-		// script changed shape: stop replaying from here on
-		if (r) this.replay = this.replay.slice(0, i);
-		return null;
-	}
-
-	private host(gen: number, init: boolean) {
-		const alive = () => init || gen === this.gen;
-		const out = (c: Record<string, unknown> & { type: Cell['type'] }) => {
-			if (alive() && !init) this.push(c);
-		};
-
+	private frontend(): Frontend {
 		return {
-			md: (text: string) => out({ type: 'md', text }),
-			note: (text: string) => out({ type: 'note', text }),
-			print: (level: string, text: string) => alive() && views.pushLog(level, text),
-			image: (list: { src: string; caption?: string }[]) => {
-				if (!alive()) return;
-				const images = (Array.isArray(list) ? list : []).filter((i) => i && i.src);
-				out({ type: 'image', images });
-				if (!init) views.pushImages(images, this.session);
+			md: (text, style) => void this.push({ type: style, text }),
+			print: (level, text) => views.pushLog(level, text),
+			image: (images) => {
+				this.push({ type: 'image', images });
+				views.pushImages(images, this.session);
 			},
-			progress: (text: string) => {
-				if (init || !alive()) return 0;
-				return this.push({ type: 'progress', text, state: 'running' }).id;
-			},
-			progress_update: (id: number, text: string | undefined, state: 'running' | 'done' | 'error') => {
+			progress: (text) => this.push({ type: 'progress', text, state: 'running' }).id,
+			progressUpdate: (id, text, state) => {
 				const c = this.cells.find((c) => c.id === id);
-				if (!c || c.type !== 'progress' || !alive()) return;
+				if (!c || c.type !== 'progress') return;
 				if (text) c.text = text;
 				c.state = state;
 			},
-
-			ask: (kind: AskKind, o: AskOpts) => {
-				if (init) return Promise.reject(new Error('init.lua cannot ask questions'));
-				if (!alive()) return never();
-				const opts: AskOpts = { ...o, options: normOptions(o.options) };
-				if (Array.isArray(o.fields))
-					opts.fields = o.fields.map((f) => ({ ...f, options: normOptions(f.options) }));
-
-				let r = this.takeReplay('ask', kind);
-				if (!r && this.future[0]?.tag === kind) {
-					r = this.future.shift()!;
-					this.log.push(r);
-				} else if (!r) this.future = [];
-				if (r) {
-					this.push({ type: 'ask', kind, opts, answered: true, answer: r.value, replayed: true });
-					// logPos of a replayed ask must point *before* its entry
-					const c = this.cells[this.cells.length - 1];
-					c.logPos = this.log.length - 1;
-					return Promise.resolve(r.value);
-				}
-				this.replaying = false;
-				const logPos = this.log.length;
-				const prev = this.prev[logPos];
-				if (prev && prev.kind === 'ask' && prev.tag === kind) opts.default = prev.value;
-				const cell = this.push({ type: 'ask', kind, opts, answered: false, replayed: false });
+			replayed: (kind, opts, answer, logPos) =>
+				void this.push({ type: 'ask', kind, opts, answered: true, answer, replayed: true }, logPos),
+			ask: (kind, opts, logPos) => {
+				const cell = this.push({ type: 'ask', kind, opts, answered: false, replayed: false }, logPos);
 				this.status = 'waiting';
-				return new Promise((resolve, reject) => {
-					this.pending.set(cell.id, async (v) => {
-						if (gen !== this.gen) return;
-						if (kind === 'secret') {
-							try {
-								await storage.setSecret(opts.name!, String(v));
-							} catch (e) {
-								return reject(e);
-							}
-							v = true;
-						}
-						this.log.push({ kind: 'ask', tag: kind, value: v });
-						this.status = 'running';
-						resolve(v);
-					});
-				});
+				return new Promise((resolve) => this.pending.set(cell.id, resolve));
 			},
-
-			http: (req: Parameters<typeof doHttp>[0]) => {
-				if (init) return doHttp(req);
-				return this.record(gen, 'http', `${req.method ?? ''} ${req.url}`, () => doHttp(req));
-			},
-			sleep: (ms: number) => {
-				const live = () => new Promise<void>((r) => setTimeout(r, ms));
-				if (init) return live();
-				// replayed sleeps are skipped
-				return this.record(gen, 'sleep', '', live);
-			},
-			seed: () => this.recordSync(init, 'seed', '', () => Math.floor(Math.random() * 2147483647)),
-
-			// persistent storage: reads are recorded, writes are skipped while replaying
-			secret_has: (name: string) => this.recordSync(init, 'store', `secret?${name}`, () => storage.secrets.includes(name)),
-			secret_list: () => this.recordSync(init, 'store', 'secrets', () => [...storage.secrets]),
-			secret_delete: (name: string) => {
-				const live = () => storage.deleteSecret(name).then(() => undefined);
-				return init ? live() : this.record(gen, 'store', `secret-delete:${name}`, live);
-			},
-			text_get: (name: string) => this.recordSync(init, 'store', `text:${name}`, () => storage.text[name]),
-			text_list: (prefix: string) =>
-				this.recordSync(init, 'store', `texts:${prefix}`, () =>
-					Object.keys(storage.text)
-						.filter((k) => k.startsWith(prefix))
-						.sort()
-				),
-			text_set: (name: string, value: string) => {
-				const live = () => storage.setText(name, String(value)).then(() => undefined);
-				return init ? live() : this.record(gen, 'store', `text-set:${name}`, live);
-			},
-			text_delete: (name: string) => {
-				const live = () => storage.deleteText(name).then(() => undefined);
-				return init ? live() : this.record(gen, 'store', `text-delete:${name}`, live);
-			},
-			unzip: (base64: string) => unzip(base64),
-
-			view: (op: string, name: string, o: { dock?: Dock; show?: boolean; size?: number }) => {
-				if (alive()) views.apply(op, name, o);
-			},
-			view_list: () => Object.keys(views.all),
-
-			resolve: (name: string, dir?: string) => scripts.resolve(name, dir ?? 'functions') ?? undefined,
-			resolve_fn: (name: string) => {
-				const p = `functions/${name}.lua`;
-				return p in scripts.files ? p : undefined;
-			},
-			source: (path: string) => scripts.files[path] ?? '',
-
-			json_encode: (v: unknown) => JSON.stringify(fixArrays(v ?? null)),
-			// wasmoon chokes on a bare null return value (it probes .then)
-			json_decode: (s: string) => JSON.parse(s) ?? undefined,
-			b64: (s: string) => toBase64(s),
-			uri: (s: string) => encodeURIComponent(s),
-
-			store_get: (k: string) => this.store.get(k),
-			store_set: (k: string, v: unknown) => this.store.set(k, v)
+			view: (op, name, o) => views.apply(op, name, o),
+			viewList: () => Object.keys(views.all)
 		};
 	}
 }

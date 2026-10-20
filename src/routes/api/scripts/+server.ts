@@ -1,5 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { readAll } from '#lib/server/scripts.js';
+import { scripts } from '#lib/server/env.js';
 import type { RequestHandler } from './$types';
 
-export const GET: RequestHandler = async () => json({ files: await readAll() });
+export const GET: RequestHandler = async () => json({ files: await scripts.readAll() });

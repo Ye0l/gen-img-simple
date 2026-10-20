@@ -1,5 +1,5 @@
 import { json } from '@sveltejs/kit';
-import { secrets, texts } from '#lib/server/storage.js';
+import { secrets, texts } from '#lib/server/env.js';
 import type { RequestHandler } from './$types';
 
 /** secret *names* only; values never leave the server */
