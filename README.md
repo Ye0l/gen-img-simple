@@ -15,7 +15,27 @@ bun run dev          # http://localhost:5173
 bun run build && bun run start   # production (adapter-node, PORT=3000)
 ```
 
-환경 변수: `SCRIPTS_DIR` (기본 `./scripts`), `HTTP_ALLOW` (http 프록시가 접근할 host 목록, 비우면 제한 없음).
+환경 변수: `SCRIPTS_DIR` (기본 `./scripts`), `DATA_DIR` (저장소 위치, 기본 `./data`, git 제외),
+`HTTP_ALLOW` (http 프록시가 접근할 host 목록, 비우면 제한 없음).
+
+## 샘플
+
+| flow | |
+|---|---|
+| `txt2img` | 백엔드(demo / A1111) 선택 → 프롬프트 → 스타일 → 생성 반복 |
+| `novelai` | NovelAI V4.5 생성. 토큰은 secret, 마지막 프롬프트·저장한 프롬프트는 text 저장소 사용 |
+| `views_demo` | preview 뷰를 상하좌우/split 으로 옮겨보기 |
+
+| function | |
+|---|---|
+| `demo_image{prompt,width,height,seed}` | 오프라인 SVG 플레이스홀더 |
+| `a1111{url,prompt,...}` | AUTOMATIC1111/Forge `/sdapi/v1/txt2img` |
+| `novelai{prompt,negative,model,width,height,steps,scale,sampler,seed,n_samples,quality,characters}` | NovelAI `image.novelai.net/ai/generate-image` → `{ {src,seed}, ... }`. `novelai.models/samplers/sizes`, `novelai.cost(p)` (Anlas 추정) |
+| `generate(backend, params)` | 위 백엔드 디스패처 |
+| `styles.list` / `styles.apply(style, prompt)` | 프롬프트 스타일 프리셋 |
+
+NovelAI 는 novelai.net → User Settings → Account → *Get Persistent API Token* 의 토큰이 필요합니다.
+flow 가 처음 실행될 때 묻고 secret `novelai` 로 저장합니다.
 
 ## Flow 작성
 
@@ -59,6 +79,14 @@ end
 | `number{ "질문", default=, min=, max=, step= }` | number |
 | `form{ "제목", fields={ {name=, label=, type="text"\|"textarea"\|"number"\|"select"\|"checkbox", default=, options=} } }` | table |
 
+| 저장소 (서버 `DATA_DIR` 에 영구 저장, *Storage* 뷰에서 관리) | |
+|---|---|
+| `secret.has(name)` / `secret.list()` / `secret.delete(name)` | 비밀키. 값은 브라우저로 돌아오지 않음 |
+| `secret.ask(name, { "라벨", force= })` | 없으면 비밀번호 입력칸으로 물어보고 저장. 답은 셀/리플레이 기록에 남지 않음 |
+| `secret(name)` / `secret.ref(name)` | `"{{secret:name}}"` 자리표시자. http url/헤더/본문에 넣으면 서버 프록시가 실제 값으로 치환 |
+| `text.get(name, default)` / `text.set(name, value)` / `text.delete(name)` / `text.list(prefix)` | 일반 텍스트 (설정, 프롬프트). 이름에 `/` 로 그룹 |
+| `store.key = value` | (영구 아님) 세션 동안만 유지되는 값 |
+
 | 뷰 | dock: `"left"` `"right"` `"top"` `"bottom"` `"split"` |
 |---|---|
 | `view.enable(name, {dock=, show=, size=})` / `view.disable(name)` | 토글 버튼 표시 / 제거 |
@@ -66,19 +94,20 @@ end
 | `view.dock(name, dock)` / `view.size(name, px 또는 split 비율 0..1)` | 위치/크기 |
 | `view.clear(name)` / `view.list()` | |
 
-기본 내장 뷰: `preview` (생성 이미지), `log`, `editor`. 모두 기본은 숨김.
+기본 내장 뷰: `preview` (생성 이미지), `log`, `editor`, `storage`. 모두 기본은 숨김.
 
 | 기타 | |
 |---|---|
 | `require("name")` | `functions/name.lua` (또는 `flows/x`, 정확한 경로) 로드. `functions/` 의 파일은 require 없이 전역 이름으로도 접근 가능 |
 | `run("flows/other")` | 다른 flow를 현재 노트북 안에서 이어서 실행 |
 | `http.request{url=, method=, headers=, body= \| json=, direct=}` · `http.get(url)` · `http.post(url, tbl)` | `{status, ok, headers, body, json, data_url}`. 기본은 서버 프록시 경유 (CORS 무관) |
-| `json.encode/decode`, `encode.base64(s)`, `encode.uri(s)`, `sleep(ms)` | |
-| `store.key = value` | 세션 동안 유지되는 값 |
+| `unzip(res \| base64)` | zip 응답 풀기 → `{ {name, mime, src}, ... }` |
+| `json.encode/decode`, `json.array(t)` (빈 테이블을 `[]` 로 보내기), `encode.base64(s)`, `encode.uri(s)`, `sleep(ms)` | |
 
 ## 수정/재실행 동작 (replay)
 
-flow는 결정적으로 다시 실행됩니다. 사용자 답변, http 응답, 난수 seed, sleep 은 순서대로 기록되고,
+flow는 결정적으로 다시 실행됩니다. 사용자 답변, http 응답, 난수 seed, sleep, 저장소 읽기는 순서대로 기록되고
+(저장소 쓰기는 리플레이 중에는 다시 실행하지 않음),
 과거 답변을 수정하면 flow를 처음부터 다시 돌리면서 그 지점까지는 기록을 그대로 돌려줍니다.
 그래서 수정 지점 이전의 이미지 생성은 다시 요청되지 않습니다.
 
@@ -100,5 +129,6 @@ src/lib/runtime/runner.svelte.ts  # wasmoon(Lua 5.4 wasm) 실행 + 셀/리플레
 src/lib/views.svelte.ts      # 내장 뷰 레지스트리 (새 뷰: 여기 + components/views/index.ts)
 src/lib/components/          # Cell, Ask, Dock, views/*
 src/routes/api/scripts       # 스크립트 읽기/저장
-src/routes/api/http          # http.request 프록시
+src/routes/api/store         # secret(쓰기 전용)/text 저장소 → DATA_DIR/secrets.json, text.json
+src/routes/api/http          # http.request 프록시 ({{secret:name}} 치환)
 ```

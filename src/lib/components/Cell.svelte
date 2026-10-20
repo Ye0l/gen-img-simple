@@ -11,6 +11,8 @@
 		const opts = c.opts.options ?? [];
 		const label = (v: unknown) => opts.find((o) => JSON.stringify(o.value) === JSON.stringify(v))?.label ?? String(v);
 		switch (c.kind) {
+			case 'secret':
+				return `•••••• (${c.opts.name} 저장됨)`;
 			case 'confirm':
 				return c.answer ? 'Yes' : 'No';
 			case 'choose':

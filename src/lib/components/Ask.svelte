@@ -14,7 +14,8 @@
 	const options: Option[] = o.options ?? [];
 	const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
-	let text = $state(initial == null ? '' : String(initial));
+	// svelte-ignore state_referenced_locally
+	let text = $state(initial == null || cell.kind === 'secret' ? '' : String(initial));
 	let num = $state(typeof initial === 'number' ? initial : Number(initial ?? o.min ?? 0));
 	let yes = $state(initial == null ? true : !!initial);
 	let cursor = $state(Math.max(0, options.findIndex((op) => same(op.value, initial))));
@@ -47,6 +48,9 @@
 			case 'input':
 				if (o.required && !text.trim()) return;
 				return send(text);
+			case 'secret':
+				if (!text.trim()) return;
+				return send(text.trim());
 			case 'number':
 				return send(num);
 			case 'confirm':
@@ -85,7 +89,10 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="ask" bind:this={root} onkeydown={keys}>
-	{#if cell.kind === 'input'}
+	{#if cell.kind === 'secret'}
+		<input data-autofocus type="password" autocomplete="off" bind:value={text} placeholder={o.placeholder ?? '••••••••'} />
+		<div class="help">서버 저장소에 <code>{o.name}</code> 으로 저장됩니다. 브라우저·로그에는 남지 않아요.</div>
+	{:else if cell.kind === 'input'}
 		{#if o.multiline}
 			<textarea data-autofocus rows="3" bind:value={text} placeholder={o.placeholder}></textarea>
 			<div class="help">Ctrl/⌘+Enter 로 제출</div>
@@ -157,7 +164,7 @@
 	{:else if oncancel}
 		<div class="actions"><button onclick={oncancel}>취소 (Esc)</button></div>
 	{/if}
-	{#if cell.answered}
+	{#if cell.answered && cell.kind !== 'secret'}
 		<label class="keep">
 			<input type="checkbox" bind:checked={keepLater} />
 			이후 답변도 그대로 적용해서 끝까지 진행 (생성은 다시 실행)

@@ -26,7 +26,8 @@ export interface PreviewItem {
 const defaults: Record<string, Omit<ViewState, 'id'>> = {
 	preview: { title: 'Preview', enabled: false, visible: false, dock: 'right', size: 420 },
 	log: { title: 'Log', enabled: false, visible: false, dock: 'bottom', size: 180 },
-	editor: { title: 'Editor', enabled: false, visible: false, dock: 'left', size: 520 }
+	editor: { title: 'Editor', enabled: false, visible: false, dock: 'left', size: 520 },
+	storage: { title: 'Storage', enabled: false, visible: false, dock: 'right', size: 460 }
 };
 
 class Views {

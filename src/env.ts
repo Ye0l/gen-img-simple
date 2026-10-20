@@ -5,6 +5,10 @@ export const variables = defineEnvVars({
 		description: 'Folder holding init.lua, functions/ and flows/ (default: ./scripts)',
 		schema: (v) => v || 'scripts'
 	},
+	DATA_DIR: {
+		description: 'Folder for persistent storage: secrets.json, text.json (default: ./data)',
+		schema: (v) => v || 'data'
+	},
 	HTTP_ALLOW: {
 		description: 'Comma separated hosts the http proxy may reach (empty: any host)',
 		schema: (v) =>

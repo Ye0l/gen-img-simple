@@ -4,3 +4,4 @@
 
 view.enable("editor", { dock = "left" })
 view.enable("log", { dock = "bottom" })
+view.enable("storage", { dock = "right" })

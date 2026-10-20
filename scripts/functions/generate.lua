@@ -4,6 +4,7 @@
 local backends = {
   demo = demo_image, -- functions are globals, no require needed
   a1111 = require("a1111"), -- ...or require them explicitly
+  novelai = function(p) return novelai(p)[1] end, -- first sample only
 }
 
 return function(backend, params)

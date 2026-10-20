@@ -153,7 +153,15 @@ end
 json = {
   encode = function(v) return H.json_encode(v) end,
   decode = function(s) return H.json_decode(s) end,
+  --- mark a table as a JSON array (an empty Lua table is otherwise sent as {})
+  array = function(t) t = t or {}; t.__array = true; return t end,
 }
+
+--- unzip(res | base64) -> { { name, mime, src = data url }, ... }
+function unzip(x)
+  if type(x) == "table" then x = x.body end
+  return await(H.unzip(x))
+end
 
 encode = {
   base64 = function(s) return H.b64(s) end,
@@ -163,6 +171,41 @@ encode = {
 function sleep(ms)
   await(H.sleep(ms))
 end
+
+-- ---------------------------------------------------------------- persistent storage
+-- Saved on the server under DATA_DIR. Manage entries in the "storage" view.
+
+--- Secrets (API keys). Values never reach the browser: use secret.ref(name)
+--- (or secret(name)) inside http headers/body/url and the server proxy fills it in.
+secret = setmetatable({
+  has = function(name) return H.secret_has(name) end,
+  list = function() return H.secret_list() end,
+  ref = function(name) return "{{secret:" .. name .. "}}" end,
+  delete = function(name) await(H.secret_delete(name)) end,
+  --- ask for the value (password field) and save it. Only asks if missing unless force = true.
+  --- secret.ask("novelai", { "NovelAI API 토큰", hint = "..." , force = false })
+  ask = function(name, o)
+    o = opts(o or name)
+    if o.force or not H.secret_has(name) then
+      o.name = name
+      await(H.ask("secret", o))
+    end
+    return "{{secret:" .. name .. "}}"
+  end,
+}, { __call = function(self, name) return self.ref(name) end })
+
+--- Plain text entries (settings, saved prompts ...). Names may contain "/" for grouping.
+text = {
+  get = function(name, default)
+    local v = H.text_get(name)
+    if v == nil then return default end
+    return v
+  end,
+  set = function(name, value) await(H.text_set(name, tostring(value))) end,
+  delete = function(name) await(H.text_delete(name)) end,
+  --- names starting with prefix, sorted
+  list = function(prefix) return H.text_list(prefix or "") end,
+}
 
 --- Shared key/value store that lives for the whole session (survives re-runs).
 store = setmetatable({}, {

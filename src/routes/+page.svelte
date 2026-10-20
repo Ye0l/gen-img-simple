@@ -6,6 +6,7 @@
 	import Dock from '#lib/components/Dock.svelte';
 	import { runner } from '#lib/runtime/runner.svelte.js';
 	import { scripts } from '#lib/scripts.svelte.js';
+	import { storage } from '#lib/storage.svelte.js';
 	import { views } from '#lib/views.svelte.js';
 
 	let error = $state<string | null>(null);
@@ -13,7 +14,7 @@
 
 	onMount(async () => {
 		try {
-			await scripts.load();
+			await Promise.all([scripts.load(), storage.load()]);
 			await runner.boot();
 			const flow = page.url.searchParams.get('flow');
 			if (flow) runner.start(flow);
